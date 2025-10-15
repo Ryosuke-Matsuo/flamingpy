@@ -1,0 +1,97 @@
+量子誤り訂正の通常の流れでは、データ（論理）モードはそのまま保持し、シンドローム（測定）モードだけを順次測定して得た結果からパリティ情報を抽出します。得られたシンドロームの時系列を使ってデコーダ（例えば MWPM や神経系デコーダなど）がエラー位置を推定し、推定に基づいてデータモードへフィードフォワード補正を入れる、という手順です。
+
+FlamingPy の CVLayer.measure_syndrome() も、クラスタ中のシンドロームモードを p ホモダイン測定して bit_val（2 値）へ翻訳する処理を実行しており、データモードには手を触れません。すなわち、誤り訂正だけを行う場合はシンドロームだけを測定するという理解で合っています。
+
+inner-decoder が適用されていない
+
+10/3
+correlation-aware binning がちゃんと機能しているように見える。まだ検証が必要。
+
+10/10
+LLR と重み計算に関する疑問。対数 -> 指数　の計算が無駄では？
+> GPT の回答が以下
+======
+理屈だけなら「偶シフトと奇シフトのガウス値をそのまま足し合わせて比を取る → p_err = Σodd / (Σeven + Σodd)」で済みます。ただし実際には
+
+exp(-0.5 * d2) は d2 が少し大きいだけで 10⁻⁵⁰ や 10⁻¹⁰⁰ といった極小値になる
+複数の候補を足すと underflow（0 に丸められる）が起きやすく、差の大きい項が全部 0 になってしまう
+という問題があるので、logsumexp を使って
+
+まず log Σ の形で数値的に安定に合計
+その差から LLR を求め
+必要に応じて exp(llr) などで比を計算
+というステップを踏んでいます。最後に p_err = 1 / (1 + exp(llr)) で確率に戻しているのは、比を安全に扱うために一度 log を使っているからです。log → exp が無駄に見えても、浮動小数点の安定性を保つために必要な手順、と考えてください。
+=======
+
+
+
+===================
+debug 用のコード
+
+from itertools import islice
+
+# テスト用の測定ベクトル（LATTICE = √π ≈ 1.772）の下で
+x = np.array([0.3, 1.4, 2.1])
+
+variances = np.array([0.1, 0.1, 0.1])   # 例: それぞれのノードの分散
+rho = 0.8                                   # 隣接モード間の相関係数
+
+covariance_3x3 = np.array([
+    [variances[0], rho*np.sqrt(variances[0]*variances[1]), 0.0],
+    [rho*np.sqrt(variances[0]*variances[1]), variances[1], rho*np.sqrt(variances[1]*variances[2])],
+    [0.0, rho*np.sqrt(variances[1]*variances[2]), variances[2]],
+])
+
+print(covariance_3x3)
+inv_cov = np.linalg.inv(covariance_3x3)
+
+# 最初の数個の候補を表示
+for q, bits, parity in islice(enumerate_candidates(x), 8):
+    print("candidate:", q, "bits:", bits, "parity:", parity)
+
+for i, (q, bits, parity) in enumerate(islice(enumerate_candidates(x), 8)):
+    d2 = mahalanobis_sq(x, q, inv_cov)
+    print(
+        f"candidate {i}: q={q}, bits={bits}, parity={parity}, "
+        f"Mahalanobis^2={d2:.4f}"
+    )
+
+=======================
+
+from flamingpy.codes.surface_code import SurfaceCode
+
+test_code = SurfaceCode(distance=2, ec="primal", boundaries="open")
+coords_order = list(test_code.all_syndrome_coords)
+
+n = len(coords_order)
+covariance = np.eye(n)
+rho = 0.28  # 隣接シンドローム間の相関
+
+adj = build_syndrome_graph(coords_order, test_code.graph)
+for u, v in adj.edges():
+    i, j = coords_order.index(u), coords_order.index(v)
+    covariance[i, j] = covariance[j, i] = rho
+
+print(covariance)
+
+#covariance = np.eye(len(coords_order))  # テスト用の 1 次元共分散
+
+layer = CorrAwareLayer(
+    test_code,
+    delta=0.1,
+    covariance=covariance,
+    coords_order=coords_order,
+    sampling_order="initial",
+)
+
+#measurements = [0.8 for _ in coords_order]  # 好きな値をセット sqrt(pi)=1.7724538509055159
+measurements = [1.4,0.48,0,0,0,0,0,1.4,1.4,0,1.4,0]  # 好きな値をセット
+for coord, val in zip(coords_order, measurements):
+    layer.code.graph.nodes[coord]["hom_val_p"] = val  # ここで属性を付ける
+
+layer.inner_decoder()  # もう KeyError は出ません
+
+print([layer.code.graph.nodes[c]["bit_val"] for c in coords_order])
+print([layer.code.graph.nodes[c]["llr"] for c in coords_order])
+
+===========================

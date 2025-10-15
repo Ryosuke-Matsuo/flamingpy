@@ -24,7 +24,7 @@ from flamingpy.decoders.mwpm import mwpm_decoder
 from flamingpy.decoders.unionfind import uf_decoder
 
 # Smallest and largest numbers representable.
-smallest_number = sys.float_info.min
+smallest_number = np.nextafter(0.0, 1.0)
 largest_number = sys.float_info.max
 
 
@@ -72,8 +72,7 @@ def assign_weights(code, decoder, **kwargs):
                         err_prob = Z_err_cond(delta_effective, hom_val)
                     # Allow for taking log of 0.
                     err_prob = min(err_prob, 0.5)
-                    # TODO: Can I just choose an arbitrary small number?
-                    if err_prob == 0:
+                    if err_prob <= 0:
                         err_prob = smallest_number
                     if weight_options.get("integer"):
                         multiplier = weight_options.get("multiplier")
@@ -115,6 +114,23 @@ def assign_weights(code, decoder, **kwargs):
             for node in qubit_coords:
                 G.nodes[node]["weight"] = 1
     # Also assign the weights to the stabilizer graph edges.
+    elif weight_options.get("method") == "custom":
+        if decoder != "MWPM":
+            raise ValueError("custom weight method is only supported for MWPM.")
+        weight_map = weight_options.get("weight_map")
+        if weight_map is None:
+            llr_map = weight_options.get("llr_map")
+            if llr_map is None:
+                raise ValueError("custom weight method requires 'llr_map'.")
+            weight_map = {
+            node: -np.log(np.clip(1.0 / (1.0 + np.exp(llr)), 1e-12, 1.0))
+            for node, llr in llr_map.items()
+        }
+        for node in qubit_coords:
+            G.nodes[node]["weight"] = weight_map.get(node, 0.0)
+            #weight = llr_map.get(node, 0.0)
+            #G.nodes[node]["weight"] = weight
+
     for ec in code.ec:
         getattr(code, f"{ec}_stab_graph").assign_weights(code)
 

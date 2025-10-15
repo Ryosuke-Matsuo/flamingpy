@@ -340,6 +340,10 @@ class SurfaceCode:
 
         self.polarity = polarity
 
+        # Initialise attributes that are populated during identify_stabilizers.
+        self.all_syndrome_coords: List[Tuple[int, int, int]] = []
+        self.all_syndrome_inds: List[int] = []
+
         self.graph = RHG_graph(self.dims, self.boundaries, polarity=polarity)
         self.graph.index_generator()
         # The following line defines the stabilizer, syndrome coordinate,
